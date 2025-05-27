@@ -6,10 +6,12 @@
 #include <sstream>
 #include <iomanip>
 #include <fstream>
+#include <filesystem>
 
 using namespace std;
+namespace fs = std::filesystem;
 
-// ANSI Color Codes
+// ANSI color codes
 const string RED = "\033[31m";
 const string GREEN = "\033[32m";
 const string YELLOW = "\033[33m";
@@ -18,16 +20,12 @@ const string MAGENTA = "\033[35m";
 const string CYAN = "\033[36m";
 const string RESET = "\033[0m";
 
-// Emojis & Symbols
-const string CHECK = "✔️";
-const string PLUS = "➕";
-const string EXIT = "🚪";
-const string HISTORY = "📜";
-const string PROMPT = "💬";
-const string STAR = "⭐";
-const string ALERT = "⚠️";
-const string WAVE = "👋";
-const string ROOM = "🏠";
+// Unicode symbols for UI flair
+const string CHECK_MARK = "\u2714";      // ✔
+const string RIGHT_ARROW = "\u27A4";     // ➤
+const string SPARKLES = "\u2728";        // ✨
+const string STAR = "\u2B50";            // ⭐
+const string WARNING = "\u26A0";         // ⚠
 
 class Message {
     string sender;
@@ -37,6 +35,9 @@ class Message {
 public:
     Message(const string& sender, const string& content)
         : sender(sender), content(content), timestamp(time(nullptr)) {}
+
+    Message(const string& sender, const string& content, time_t ts)
+        : sender(sender), content(content), timestamp(ts) {}
 
     string toString() const {
         stringstream ss;
@@ -52,7 +53,7 @@ class ChatRoom {
     vector<Message> messages;
 
 public:
-    ChatRoom() = default;
+    ChatRoom() : roomName("default") {}
     ChatRoom(const string& name) : roomName(name) {}
 
     void addMessage(const Message& msg) {
@@ -60,23 +61,70 @@ public:
     }
 
     void showHistory() const {
-        cout << BLUE << HISTORY << " Chat History for '" << roomName << "':" << RESET << "\n";
+        cout << CYAN << STAR << "=== Chat History for Room: " << roomName << " ===" << RESET << "\n";
         for (const auto& msg : messages) {
-            cout << PROMPT << " " << msg.toString() << "\n";
+            cout << RIGHT_ARROW << " " << msg.toString() << "\n";
         }
-        cout << CYAN << "----------------------------------" << RESET << "\n";
+        cout << CYAN << "======================================\n" << RESET;
     }
 
-    void saveToFile() const {
-        ofstream file(roomName + "_history.txt", ios::app);
-        for (const auto& msg : messages) {
-            file << msg.toString() << "\n";
-        }
-        file.close();
+    const string& getName() const { return roomName; }
+
+    void saveMessageToFile(const Message& msg) const {
+        ofstream out(roomName + "_history.txt", ios::app);
+        if (!out) return;
+        out << msg.toString() << "\n";
+        out.close();
     }
 
-    const string& getName() const {
-        return roomName;
+    void loadFromFile() {
+        messages.clear();
+        ifstream in(roomName + "_history.txt");
+        if (!in) return;
+
+        string line;
+
+        // Helper to strip ANSI color codes
+        auto removeAnsi = [](const string& s) {
+            string res;
+            bool skip = false;
+            for (char c : s) {
+                if (c == '\033') { skip = true; continue; }
+                if (skip) {
+                    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) skip = false;
+                    continue;
+                }
+                res += c;
+            }
+            return res;
+        };
+
+        while (getline(in, line)) {
+            // Expected format:
+            // [YYYY-MM-DD HH:MM:SS] sender: content
+            size_t firstBracket = line.find(']');
+            if (firstBracket == string::npos) continue;
+            string timeStr = line.substr(1, firstBracket - 1);
+            string rest = line.substr(firstBracket + 2);
+
+            size_t colonPos = rest.find(": ");
+            if (colonPos == string::npos) continue;
+
+            string senderColored = rest.substr(0, colonPos);
+            string content = rest.substr(colonPos + 2);
+
+            string sender = removeAnsi(senderColored);
+
+            // Parse timestamp
+            tm tm = {};
+            istringstream ss(timeStr);
+            ss >> get_time(&tm, "%Y-%m-%d %H:%M:%S");
+            time_t timestamp = mktime(&tm);
+
+            messages.emplace_back(sender, content, timestamp);
+        }
+
+        in.close();
     }
 };
 
@@ -86,86 +134,108 @@ class ChatSimulator {
     string currentUser;
 
 public:
-    ChatSimulator(const string& user) : currentUser(user) {}
+    ChatSimulator(const string& username) : currentUser(username) {
+        loadRoomsFromDisk();
+    }
+
+    void loadRoomsFromDisk() {
+        for (const auto& entry : fs::directory_iterator(".")) {
+            string filename = entry.path().filename().string();
+            if (filename.size() > 12 && filename.substr(filename.size() - 12) == "_history.txt") {
+                string roomName = filename.substr(0, filename.size() - 12);
+                if (chatRooms.find(roomName) == chatRooms.end()) {
+                    ChatRoom room(roomName);
+                    room.loadFromFile();
+                    chatRooms.emplace(roomName, room);
+                }
+            }
+        }
+    }
 
     void joinRoom(const string& roomName) {
         if (chatRooms.find(roomName) == chatRooms.end()) {
             chatRooms.emplace(roomName, ChatRoom(roomName));
-            cout << GREEN << PLUS << " Created new room: " << ROOM << " " << roomName << RESET << "\n";
+            cout << GREEN << CHECK_MARK << " Created and joined ";
         } else {
-            cout << GREEN << CHECK << " Joined existing room: " << ROOM << " " << roomName << RESET << "\n";
+            cout << GREEN << CHECK_MARK << " Joined ";
         }
         currentRoom = roomName;
+        cout << "room: " << YELLOW << currentRoom << RESET << "\n";
     }
 
-    void sendMessage(const string& msg) {
+    void sendMessage(const string& content) {
         if (currentRoom.empty()) {
-            cout << RED << ALERT << " You must join a room first using /join <room>" << RESET << "\n";
+            cout << RED << WARNING << " Join a room first using /join <roomname>" << RESET << "\n";
             return;
         }
-        Message message(currentUser, msg);
-        chatRooms[currentRoom].addMessage(message);
-        chatRooms[currentRoom].saveToFile();
-        cout << GREEN << PROMPT << " Message sent to " << ROOM << " " << currentRoom << RESET << "\n";
+        Message msg(currentUser, content);
+        chatRooms[currentRoom].addMessage(msg);
+        chatRooms[currentRoom].saveMessageToFile(msg);
+        cout << CYAN << RIGHT_ARROW << " Message sent." << RESET << "\n";
     }
 
-    void showHistory() const {
+    void showHistory() {
         if (currentRoom.empty()) {
-            cout << RED << ALERT << " No room joined yet!" << RESET << "\n";
+            cout << RED << WARNING << " Join a room first." << RESET << "\n";
             return;
         }
-        chatRooms.at(currentRoom).showHistory();
+        chatRooms[currentRoom].showHistory();
     }
 
-    void listRooms() const {
+    void listRooms() {
         if (chatRooms.empty()) {
-            cout << YELLOW << ALERT << " No rooms available yet." << RESET << "\n";
+            cout << YELLOW << STAR << " No chat rooms available yet." << RESET << "\n";
             return;
         }
-        cout << MAGENTA << ROOM << " Available Rooms:\n" << RESET;
+        cout << CYAN << STAR << " Available chat rooms:" << RESET << "\n";
         for (const auto& [name, room] : chatRooms) {
-            cout << "  - " << ROOM << " " << name << "\n";
+            cout << " " << RIGHT_ARROW << " " << name << "\n";
         }
     }
 };
 
 int main() {
-    cout << CYAN << "====================================" << RESET << "\n";
-    cout << MAGENTA << "     💬 Welcome to ChatSim v1.0    " << RESET << "\n";
-    cout << CYAN << "====================================" << RESET << "\n";
+    cout << CYAN << "========================================" << RESET << "\n";
+    cout << MAGENTA << "    💬 Welcome to Chat Simulator 💬    " << RESET << "\n";
+    cout << YELLOW << "         " << SPARKLES << " Have a vibrant chat! " << SPARKLES << "         " << RESET << "\n";
+    cout << CYAN << "========================================\n" << RESET;
 
-    cout << BLUE << "Enter your username " << WAVE << ": " << RESET;
-    string user;
-    getline(cin, user);
+    cout << BLUE << RIGHT_ARROW << " Enter your username: " << RESET;
+    string username;
+    getline(cin, username);
 
-    ChatSimulator sim(user);
+    ChatSimulator chat(username);
 
-    cout << "\n" << STAR << " Commands:\n";
-    cout << YELLOW << "  /join <room>   " << RESET << "- Join or create a chat room\n";
-    cout << YELLOW << "  /history       " << RESET << "- Show chat history of current room\n";
-    cout << YELLOW << "  /rooms         " << RESET << "- List all available chat rooms\n";
-    cout << YELLOW << "  /exit          " << RESET << "- Exit the chat simulator\n";
-    cout << MAGENTA << "------------------------------------\n" << RESET;
+    cout << "\n" << MAGENTA << "Commands:" << RESET << "\n";
+    cout << YELLOW << "  /join roomname  " << RESET << "- Join or create a chat room\n";
+    cout << YELLOW << "  /history        " << RESET << "- Show chat history of current room\n";
+    cout << YELLOW << "  /rooms          " << RESET << "- List all chat rooms\n";
+    cout << YELLOW << "  /exit           " << RESET << "- Quit the program\n";
+    cout << GREEN << "Type your messages to send to the current room.\n" << RESET;
 
     string input;
     while (true) {
-        cout << GREEN << PROMPT << " > " << RESET;
+        cout << MAGENTA << STAR << " " << RESET;
         getline(cin, input);
 
-        if (input == "/exit") {
-            cout << BLUE << WAVE << " Goodbye!" << RESET << "\n";
-            break;
-        } else if (input.rfind("/join ", 0) == 0) {
+        if (input == "/exit") break;
+
+        if (input.rfind("/join ", 0) == 0) {
             string roomName = input.substr(6);
-            sim.joinRoom(roomName);
+            if (roomName.empty()) {
+                cout << RED << WARNING << " Please specify a room name." << RESET << "\n";
+                continue;
+            }
+            chat.joinRoom(roomName);
         } else if (input == "/history") {
-            sim.showHistory();
+            chat.showHistory();
         } else if (input == "/rooms") {
-            sim.listRooms();
+            chat.listRooms();
         } else if (!input.empty()) {
-            sim.sendMessage(input);
+            chat.sendMessage(input);
         }
     }
 
+    cout << CYAN << CHECK_MARK << " Goodbye!" << RESET << "\n";
     return 0;
 }
